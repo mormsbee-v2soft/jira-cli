@@ -183,6 +183,145 @@ def extract_adf_text(node):
     return " ".join(parts).strip()
 
 
+def markdown_to_adf(text):
+    """Convert markdown-formatted text to Atlassian Document Format (ADF).
+
+    Supports: headings (##), code blocks (```), bold (**), italic (*),
+    inline code (`), bullet lists (- /  * ), numbered lists (1. ),
+    and paragraph separation via blank lines.
+    """
+    import re
+
+    doc = {"version": 1, "type": "doc", "content": []}
+
+    def parse_inline(text):
+        """Parse inline markdown (bold, italic, code) into ADF text nodes."""
+        nodes = []
+        # Pattern handles: `code`, **bold**, *italic*, plain text
+        pattern = re.compile(r'(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)')
+        last = 0
+        for m in pattern.finditer(text):
+            # Add preceding plain text
+            if m.start() > last:
+                plain = text[last:m.start()]
+                if plain:
+                    nodes.append({"type": "text", "text": plain})
+            code, bold, italic = m.group(1), m.group(2), m.group(3)
+            if code:
+                nodes.append({"type": "text", "text": code[1:-1], "marks": [{"type": "code"}]})
+            elif bold:
+                nodes.append({"type": "text", "text": bold[2:-2], "marks": [{"type": "strong"}]})
+            elif italic:
+                nodes.append({"type": "text", "text": italic[1:-1], "marks": [{"type": "em"}]})
+            last = m.end()
+        # Trailing plain text
+        if last < len(text):
+            remaining = text[last:]
+            if remaining:
+                nodes.append({"type": "text", "text": remaining})
+        if not nodes:
+            nodes.append({"type": "text", "text": text})
+        return nodes
+
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Code block: ```lang ... ```
+        if line.strip().startswith("```"):
+            lang_match = re.match(r'^```(\w*)', line.strip())
+            lang = lang_match.group(1) if lang_match else ""
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # skip closing ```
+            block = {"type": "codeBlock", "content": [{"type": "text", "text": "\n".join(code_lines)}]}
+            if lang:
+                block["attrs"] = {"language": lang}
+            doc["content"].append(block)
+            continue
+
+        # Heading: # / ## / ### etc.
+        heading_match = re.match(r'^(#{1,6})\s+(.*)', line)
+        if heading_match:
+            level = len(heading_match.group(1))
+            doc["content"].append({
+                "type": "heading",
+                "attrs": {"level": level},
+                "content": parse_inline(heading_match.group(2)),
+            })
+            i += 1
+            continue
+
+        # Bullet list: collect consecutive lines starting with - or *  (but not **)
+        bullet_match = re.match(r'^[\s]*([-*])\s+(.*)', line)
+        if bullet_match and not line.strip().startswith("**"):
+            items = []
+            while i < len(lines):
+                bm = re.match(r'^[\s]*([-*])\s+(.*)', lines[i])
+                if bm and not lines[i].strip().startswith("**"):
+                    items.append(bm.group(2))
+                    i += 1
+                else:
+                    break
+            list_node = {"type": "bulletList", "content": []}
+            for item_text in items:
+                list_node["content"].append({
+                    "type": "listItem",
+                    "content": [{"type": "paragraph", "content": parse_inline(item_text)}],
+                })
+            doc["content"].append(list_node)
+            continue
+
+        # Numbered list: 1. / 2. etc.
+        num_match = re.match(r'^[\s]*\d+\.\s+(.*)', line)
+        if num_match:
+            items = []
+            while i < len(lines):
+                nm = re.match(r'^[\s]*\d+\.\s+(.*)', lines[i])
+                if nm:
+                    items.append(nm.group(1))
+                    i += 1
+                else:
+                    break
+            list_node = {"type": "orderedList", "content": []}
+            for item_text in items:
+                list_node["content"].append({
+                    "type": "listItem",
+                    "content": [{"type": "paragraph", "content": parse_inline(item_text)}],
+                })
+            doc["content"].append(list_node)
+            continue
+
+        # Blank line — skip (paragraph separation)
+        if not line.strip():
+            i += 1
+            continue
+
+        # Regular paragraph — collect consecutive non-blank, non-special lines
+        para_lines = []
+        while i < len(lines):
+            l = lines[i]
+            if not l.strip():
+                break
+            if l.strip().startswith("```") or re.match(r'^#{1,6}\s+', l):
+                break
+            if re.match(r'^[\s]*([-*])\s+', l) and not l.strip().startswith("**"):
+                break
+            if re.match(r'^[\s]*\d+\.\s+', l):
+                break
+            para_lines.append(l)
+            i += 1
+        para_text = " ".join(para_lines)
+        if para_text:
+            doc["content"].append({"type": "paragraph", "content": parse_inline(para_text)})
+
+    return doc
+
+
 # --- Commands ---
 
 def cmd_issue(args):
@@ -246,11 +385,7 @@ def cmd_create(args):
     if args.component:
         payload["fields"]["components"] = [{"name": args.component}]
     if args.description:
-        payload["fields"]["description"] = {
-            "version": 1,
-            "type": "doc",
-            "content": [{"type": "paragraph", "content": [{"type": "text", "text": args.description}]}]
-        }
+        payload["fields"]["description"] = markdown_to_adf(args.description)
     if args.label:
         payload["fields"]["labels"] = args.label
     if args.assignee:
@@ -265,15 +400,39 @@ def cmd_create(args):
     print(f"Created: {result['key']} — {get_base_url()}/browse/{result['key']}")
 
 
+def cmd_update(args):
+    """Update an existing issue's fields."""
+    payload = {"fields": {}}
+    if args.summary:
+        payload["fields"]["summary"] = args.summary
+    if args.description:
+        payload["fields"]["description"] = markdown_to_adf(args.description)
+    if args.component:
+        payload["fields"]["components"] = [{"name": args.component}]
+    if args.label:
+        payload["fields"]["labels"] = args.label
+    if args.priority:
+        payload["fields"]["priority"] = {"name": args.priority}
+    if args.parent:
+        payload["fields"]["parent"] = {"key": args.parent}
+    if args.assignee:
+        users = api_get("/rest/api/3/user/search", {"query": args.assignee, "maxResults": 1})
+        if users:
+            payload["fields"]["assignee"] = {"accountId": users[0]["accountId"]}
+        else:
+            print(f"Warning: user '{args.assignee}' not found, skipping assignee", file=sys.stderr)
+
+    if not payload["fields"]:
+        print("Nothing to update — provide at least one field flag.", file=sys.stderr)
+        sys.exit(1)
+
+    api_put(f"/rest/api/3/issue/{args.key}", payload)
+    print(f"Updated: {args.key}")
+
+
 def cmd_comment(args):
     """Add a comment to an issue."""
-    body = {
-        "body": {
-            "version": 1,
-            "type": "doc",
-            "content": [{"type": "paragraph", "content": [{"type": "text", "text": args.message}]}]
-        }
-    }
+    body = {"body": markdown_to_adf(args.message)}
     api_post(f"/rest/api/3/issue/{args.key}/comment", body)
     print(f"Comment added to {args.key}.")
 
@@ -406,6 +565,18 @@ def main():
     p.add_argument("--label", "-l", action="append", help="Label (repeatable)")
     p.add_argument("--assignee", "-a", help="Assignee name/email")
     p.set_defaults(func=cmd_create)
+
+    # update
+    p = sub.add_parser("update", aliases=["up"], help="Update issue fields")
+    p.add_argument("key", help="Issue key (e.g., ENG-1234)")
+    p.add_argument("--summary", "-s", help="New summary")
+    p.add_argument("--description", "-d", help="New description (markdown)")
+    p.add_argument("--component", help="Component name")
+    p.add_argument("--label", "-l", action="append", help="Label (repeatable, replaces all)")
+    p.add_argument("--priority", help="Priority name")
+    p.add_argument("--parent", help="Parent issue key")
+    p.add_argument("--assignee", "-a", help="Assignee name/email")
+    p.set_defaults(func=cmd_update)
 
     # comment
     p = sub.add_parser("comment", aliases=["cm"], help="Add comment")
