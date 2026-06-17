@@ -86,6 +86,8 @@ jira-cli children ENG-100        # List all children/subtasks
 
 ### Create issues
 
+**Description format:** The `--description` flag accepts **markdown** (not Jira wiki markup). The CLI converts it to Atlassian Document Format (ADF) automatically. Use `##` for headings, `**bold**`, `*italic*`, `` `code` ``, `- ` for bullets, `1. ` for numbered lists, and ` ``` ` for code blocks. Do **not** use Jira wiki syntax (`h2.`, `{code}`, `*wiki bold*`) — it will render as literal text.
+
 ```bash
 # Basic task
 jira-cli create -s "Fix timeout in auth flow"
@@ -98,7 +100,14 @@ jira-cli create \
   --parent ENG-100 \
   --component Backend \
   --label reliability \
-  --description "We need exponential backoff for..." \
+  --description "## Problem
+
+We need exponential backoff for webhook retries.
+
+## Solution
+
+- Add configurable retry with **exponential backoff**
+- Max 3 retries with \`RetryPolicy\` config" \
   --assignee "jane.smith"
 ```
 
@@ -189,8 +198,12 @@ Quick reference:
 - `jira-cli issue KEY` — full details | `-c` for one-liner
 - `jira-cli parent KEY` — parent issue details
 - `jira-cli children KEY` — list subtasks/child issues
-- `jira-cli create -s "summary" --parent KEY --component NAME --type Task`
-- `jira-cli comment KEY "message"`
+- `jira-cli create -s "summary" --parent KEY --component NAME --type Task -d "markdown description"`
+- `jira-cli comment KEY "markdown message"`
+
+**IMPORTANT:** `--description` and comment bodies must use **markdown** format
+(## headings, **bold**, - bullets, \`code\`). NOT Jira wiki markup (h2., *bold*, {code}).
+The CLI auto-converts markdown to Atlassian Document Format (ADF).
 - `jira-cli transitions KEY` — list available status moves
 - `jira-cli transition KEY "status"` — move issue (alias: mv, partial match OK)
 - `jira-cli search "JQL query" -m 20`
